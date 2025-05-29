@@ -13,6 +13,12 @@ class ViewController: UIViewController {
     let imageView = UIImageView()
     let tableView = UITableView()
     var extractedNames: [String] = []
+    
+    // Total time slots calculation (3 hours = 9 * 20-minute slots)
+    let totalSlots = 9
+    let matchesPerPlayer = 6
+    let restsPerPlayer = 3
+
     override func viewDidLoad() {
         super.viewDidLoad()
         
@@ -22,107 +28,94 @@ class ViewController: UIViewController {
         setupImageView()
         setupTableView()
         setupPickImageButton()
+//        generate()
     }
     
     @objc func generate() {
         // Example usage:
-        if extractedNames.count < 24 {
+        
+//        extractedNames = (1...30).map { "Player \($0)" }
+        if extractedNames.count < 30 {
             return
         }
+        print("Starting")
         if let schedule = generatePadelSchedule(players: extractedNames) {
+            print("Scheduel created")
             let csvURL = exportScheduleToCSV(schedule)
             print("CSV file created at")
             // You can share this file or open it in Numbers/Excel
+        } else {
+            print("Failed!")
         }
     }
     
+    // MARK: - Data Structures
     struct Match {
         let team1: (String, String)
         let team2: (String, String)
         let court: Int
     }
-    
+
     struct TimeSlot {
         let period: String
         let matches: [Match]
         let restingPlayers: [String]
     }
-    
+
     struct PlayerSchedule {
         var matchesPlayed: Int = 0
         var matchesResting: Int = 0
         var consecutiveMatches: Int = 0
-        var lastPlayedWith: [String: Int] = [:] // Tracks times played with each teammate
-        var lastPlayedAgainst: [String: Int] = [:] // Tracks times played against each opponent
+        var consecutiveRests: Int = 0
+        var lastPlayedWith: [String: Int] = [:]
+        var lastPlayedAgainst: [String: Int] = [:]
     }
-    
+
+    // MARK: - Main Function
     func generatePadelSchedule(players: [String]) -> [TimeSlot]? {
-        guard players.count == 24 else {
-            print("Error: Exactly 24 players are required")
+        guard players.count == 30 else {
+            print("Error: Exactly 30 players required")
             return nil
         }
         
         let uniquePlayers = Array(Set(players))
-        guard uniquePlayers.count == 24 else {
-            print("Error: Player names must be unique")
+        guard uniquePlayers.count == 30 else {
+            print("Error: Duplicate player names")
             return nil
         }
         
         var schedule = [TimeSlot]()
         var playerStats = [String: PlayerSchedule]()
-        for player in players {
-            playerStats[player] = PlayerSchedule()
-        }
+        players.forEach { playerStats[$0] = PlayerSchedule() }
         
-        // Create 6 time slots
-        for timeSlotIndex in 0..<6 {
-            // Time formatting
-            let startMinutes = 9 * 60 + timeSlotIndex * 20
-            let endMinutes = startMinutes + 20
-
-            let startHour = startMinutes / 60
-            let startMinute = startMinutes % 60
-            let endHour = endMinutes / 60
-            let endMinute = endMinutes % 60
-
-            let period = String(format: "%d:%02d - %d:%02d", startHour, startMinute, endHour, endMinute)
-            
-            //
+        let totalSlots = 9 // 3 hours = 9 × 20-minute slots
+        let matchesPerPlayer = 6
+        let restsPerPlayer = 3
+        
+        for timeSlotIndex in 0..<totalSlots {
+            print("INDEXNum ", timeSlotIndex)
+            let period = "\(timeSlotIndex * 20 + 1)-\((timeSlotIndex + 1) * 20) minutes"
             var attempts = 0
-            let maxAttempts = 500
+            let maxAttempts = 1000
             
-            var timeSlotSuccess = false
-            var timeSlotMatches: [Match]?
-            var timeSlotRestingPlayers: [String]?
+            var timeSlot: (matches: [Match], restingPlayers: [String])?
             
-            // Try multiple attempts to generate this time slot
-            while attempts < maxAttempts && !timeSlotSuccess {
-                if let result = tryGenerateTimeSlot(
+            while attempts < maxAttempts && timeSlot == nil {
+                print("attempt ", attempts)
+                timeSlot = tryGenerateTimeSlot(
                     players: players,
                     playerStats: playerStats,
                     timeSlotIndex: timeSlotIndex,
                     previousRestingPlayers: schedule.last?.restingPlayers ?? []
-                ) {
-                    // Verify this time slot won't cause future violations
-                    if validateProposedTimeSlot(
-                        result: result,
-                        playerStats: playerStats,
-                        remainingSlots: 5 - timeSlotIndex
-                    ) {
-                        timeSlotMatches = result.matches
-                        timeSlotRestingPlayers = result.restingPlayers
-                        timeSlotSuccess = true
-                    }
-                }
+                )
                 attempts += 1
             }
             
-            guard let matches = timeSlotMatches, let restingPlayers = timeSlotRestingPlayers else {
-                print("Error: Could not generate valid schedule for time slot \(timeSlotIndex + 1)")
+            guard let (matches, restingPlayers) = timeSlot else {
+                print("Failed to generate time slot \(timeSlotIndex + 1)")
                 return nil
             }
             
-            // Update player stats with the successful time slot
             updatePlayerStats(
                 playerStats: &playerStats,
                 matches: matches,
@@ -130,92 +123,98 @@ class ViewController: UIViewController {
                 previousRestingPlayers: schedule.last?.restingPlayers ?? []
             )
             
-            schedule.append(TimeSlot(period: period, matches: matches, restingPlayers: restingPlayers))
+            schedule.append(TimeSlot(
+                period: period,
+                matches: matches,
+                restingPlayers: restingPlayers
+            ))
         }
         
         // Final validation
         for (player, stats) in playerStats {
-            guard stats.matchesPlayed == 4 && stats.matchesResting == 2 else {
-                print("Validation Error: Player \(player) has \(stats.matchesPlayed) matches and \(stats.matchesResting) rests")
+            guard stats.matchesPlayed == matchesPerPlayer && stats.matchesResting == restsPerPlayer else {
+                print("Validation failed for \(player): \(stats.matchesPlayed) matches, \(stats.matchesResting) rests")
                 return nil
             }
         }
-        
+        debugValidate(schedule, players: players)
         return schedule
     }
-    
+
+    // MARK: - Helper Functions
     private func tryGenerateTimeSlot(
         players: [String],
         playerStats: [String: PlayerSchedule],
         timeSlotIndex: Int,
         previousRestingPlayers: [String]
     ) -> (matches: [Match], restingPlayers: [String])? {
-        var availablePlayers = players.shuffled()
-        var selectedPlayers = [String]()
+        let requiredResting = 10
         var restingPlayers = [String]()
+        var selectedPlayers = [String]()
         var matches = [Match]()
         
-        // 1. Determine who must rest (played 2 consecutive matches or already played 4 matches)
-        var mustRestPlayers = players.filter { player in
-            let stats = playerStats[player]!
-            return stats.consecutiveMatches >= 2 || stats.matchesPlayed >= 4
+        // 1. Calculate remaining needs
+        let remainingSlots = 8 - timeSlotIndex // 0-based index
+        
+        // 2. Priority: Players who MUST rest to complete their 3 rests
+        let mustRestNow = players.filter {
+            let neededRests = 3 - playerStats[$0]!.matchesResting
+            return neededRests > 0 && neededRests >= remainingSlots
         }
         
-        // 2. Also prioritize players who have only rested once when they need to rest twice
-        let needSecondRest = players.filter { player in
-            let stats = playerStats[player]!
-            return stats.matchesResting == 1 && stats.matchesPlayed + (5 - timeSlotIndex) > 4
-        }
-        mustRestPlayers.append(contentsOf: needSecondRest)
+        // 3. Add must-rest players first
+        restingPlayers.append(contentsOf: mustRestNow.prefix(requiredResting))
         
-        // 3. Select 8 resting players
-        while restingPlayers.count < 8 {
-            // First add must-rest players
-            if !mustRestPlayers.isEmpty {
-                let player = mustRestPlayers.removeFirst()
-                if !restingPlayers.contains(player) && !selectedPlayers.contains(player) {
-                    restingPlayers.append(player)
-                    continue
-                }
-            }
+        // 4. Fill remaining rests with players needing rests
+        if restingPlayers.count < requiredResting {
+            let additionalNeeded = requiredResting - restingPlayers.count
+            let candidates = players
+                .filter { !restingPlayers.contains($0) }
+                .filter { !previousRestingPlayers.contains($0) }
+                .filter { playerStats[$0]!.matchesResting < 2 } // Prefer players who still can rest
+                .sorted { playerStats[$0]!.matchesResting > playerStats[$1]!.matchesResting }
             
-            // Then add players who need to rest to meet their quota
-            if let player = availablePlayers.first(where: { player in
-                !restingPlayers.contains(player) &&
-                !selectedPlayers.contains(player) &&
-                (playerStats[player]!.matchesResting == 0 && playerStats[player]!.matchesPlayed + (6 - timeSlotIndex) > 4)
-            }) {
-                restingPlayers.append(player)
-                continue
-            }
-            
-            // Then add random players who haven't rested twice yet
-            if let player = availablePlayers.filter({ player in
-                !restingPlayers.contains(player) &&
-                !selectedPlayers.contains(player) &&
-                playerStats[player]!.matchesResting < 2
-            }).randomElement() {
-                restingPlayers.append(player)
-            } else {
-                return nil
-            }
+            restingPlayers.append(contentsOf: candidates.prefix(additionalNeeded))
         }
         
-        // 4. Get playing players (must have played < 4 matches)
-        let playingPlayers = players.filter { player in
-            !restingPlayers.contains(player) && playerStats[player]!.matchesPlayed < 4
-        }.shuffled()
+        // 5. Final fallback if still not enough
+        if restingPlayers.count < requiredResting {
+            let remaining = players
+                .filter { !restingPlayers.contains($0) }
+                .filter { !previousRestingPlayers.contains($0) }
+                .prefix(requiredResting - restingPlayers.count)
+            restingPlayers.append(contentsOf: remaining)
+        }
         
-        // 5. Create matches for 4 courts
-        for court in 1...4 {
-            var bestTeamPair: ([String], [String])? = nil
+        // 6. Get playing players with remaining capacity
+        let playingPlayers = players
+            .filter { !restingPlayers.contains($0) }
+            .filter { playerStats[$0]!.matchesPlayed < 6 }
+        
+        // 7. Emergency override for final slots
+        if timeSlotIndex >= 6 { // Last 3 slots
+            return emergencySlotGeneration(
+                players: players,
+                playingPlayers: playingPlayers,
+                restingPlayers: restingPlayers,
+                playerStats: playerStats
+            )
+        }
+        
+        // 7. Create matches with improved team selection
+        for court in 1...5 {
             var bestScore = Int.max
+            var bestTeams: ([String], [String])? = nil
             
-            // Try to find the best possible team pairing
-            for p1 in playingPlayers where !selectedPlayers.contains(p1) && playerStats[p1]!.matchesPlayed < 4 {
-                for p2 in playingPlayers where p2 != p1 && !selectedPlayers.contains(p2) && playerStats[p2]!.matchesPlayed < 4 {
-                    for p3 in playingPlayers where p3 != p1 && p3 != p2 && !selectedPlayers.contains(p3) && playerStats[p3]!.matchesPlayed < 4 {
-                        for p4 in playingPlayers where p4 != p1 && p4 != p2 && p4 != p3 && !selectedPlayers.contains(p4) && playerStats[p4]!.matchesPlayed < 4 {
+            // Try all combinations of available players
+            for p1 in playingPlayers where !selectedPlayers.contains(p1) {
+                for p2 in playingPlayers where p2 > p1 && !selectedPlayers.contains(p2) {
+                    let remaining = playingPlayers
+                        .filter { $0 != p1 && $0 != p2 }
+                        .filter { !selectedPlayers.contains($0) }
+                    
+                    for p3 in remaining {
+                        for p4 in remaining where p4 > p3 {
                             let team1 = [p1, p2].sorted()
                             let team2 = [p3, p4].sorted()
                             
@@ -227,14 +226,14 @@ class ViewController: UIViewController {
                             
                             if score < bestScore {
                                 bestScore = score
-                                bestTeamPair = (team1, team2)
+                                bestTeams = (team1, team2)
                             }
                         }
                     }
                 }
             }
             
-            guard let (team1, team2) = bestTeamPair else {
+            guard let (team1, team2) = bestTeams else {
                 return nil
             }
             
@@ -251,6 +250,32 @@ class ViewController: UIViewController {
         return (matches, restingPlayers)
     }
     
+    private func emergencySlotGeneration(
+        players: [String],
+        playingPlayers: [String],
+        restingPlayers: [String],
+        playerStats: [String: PlayerSchedule]
+    ) -> (matches: [Match], restingPlayers: [String])? {
+        var matches = [Match]()
+        var availablePlayers = playingPlayers.shuffled()
+        
+        for court in 1...5 {
+            guard availablePlayers.count >= 4 else { return nil }
+            
+            let team1 = Array(availablePlayers.prefix(2))
+            let team2 = Array(availablePlayers[2..<4])
+            availablePlayers = Array(availablePlayers.dropFirst(4))
+            
+            matches.append(Match(
+                team1: (team1[0], team1[1]),
+                team2: (team2[0], team2[1]),
+                court: court
+            ))
+        }
+        
+        return (matches, restingPlayers)
+    }
+
     private func calculateTeamScore(
         team1: [String],
         team2: [String],
@@ -258,107 +283,67 @@ class ViewController: UIViewController {
     ) -> Int {
         var score = 0
         
-        // Check teammate constraints
-        for player in team1 {
-            if let teammate = team1.first(where: { $0 != player }) {
-                let playedWithCount = playerStats[player]?.lastPlayedWith[teammate] ?? 0
-                if playedWithCount >= 2 {
-                    score += 100 // Penalize playing with same teammate too much
-                } else {
-                    score += playedWithCount * 10
-                }
+        // 1. Calculate partner penalty
+        let partnerPenalty = [team1, team2].reduce(0) { acc, team in
+            acc + team.reduce(0) { innerAcc, player in
+                let partner = team.first { $0 != player }!
+                return innerAcc + (playerStats[player]!.lastPlayedWith[partner] ?? 0)
+            }
+        }
+        score += partnerPenalty * 100
+        
+        // 2. Calculate opponent penalty in separate steps
+        let team1vsTeam2 = team1.reduce(0) { acc, player in
+            acc + team2.reduce(0) { innerAcc, opponent in
+                innerAcc + (playerStats[player]!.lastPlayedAgainst[opponent] ?? 0)
             }
         }
         
-        for player in team2 {
-            if let teammate = team2.first(where: { $0 != player }) {
-                let playedWithCount = playerStats[player]?.lastPlayedWith[teammate] ?? 0
-                if playedWithCount >= 2 {
-                    score += 100
-                } else {
-                    score += playedWithCount * 10
-                }
+        let team2vsTeam1 = team2.reduce(0) { acc, player in
+            acc + team1.reduce(0) { innerAcc, opponent in
+                innerAcc + (playerStats[player]!.lastPlayedAgainst[opponent] ?? 0)
             }
         }
         
-        // Check opponent constraints
-        for player in team1 {
-            for opponent in team2 {
-                let playedAgainstCount = playerStats[player]?.lastPlayedAgainst[opponent] ?? 0
-                if playedAgainstCount >= 3 {
-                    score += 50 // Penalize playing against same opponent too much
-                } else {
-                    score += playedAgainstCount * 5
-                }
-            }
-        }
+        let opponentPenalty = team1vsTeam2 + team2vsTeam1
+        score += opponentPenalty * 50
         
-        // Add score based on how many matches players have left
-        for player in team1 + team2 {
-            let matchesLeft = 4 - (playerStats[player]?.matchesPlayed ?? 0)
-            score += (6 - matchesLeft) * 2 // Prefer players with more matches left
+        // 3. Match balance bonus
+        let balanceBonus = (team1 + team2).reduce(0) {
+            $0 + (6 - playerStats[$1]!.matchesPlayed)
         }
+        score -= balanceBonus * 20
+        
+        // 4. Consecutive match penalty
+        let consecutivePenalty = (team1 + team2).reduce(0) {
+            $0 + (playerStats[$1]!.consecutiveMatches >= 2 ? 100 : 0)
+        }
+        score += consecutivePenalty
         
         return score
     }
-    
-    private func validateProposedTimeSlot(
-        result: (matches: [Match], restingPlayers: [String]),
-        playerStats: [String: PlayerSchedule],
-        remainingSlots: Int
-    ) -> Bool {
-        // Make sure no player will exceed their match limit
-        for player in result.restingPlayers {
-            let currentMatches = playerStats[player]?.matchesPlayed ?? 0
-            if currentMatches + remainingSlots < 4 {
-                // This player needs to play in future slots but is resting now
-                return false
-            }
-        }
-        
-        // Check players who are playing
-        var tempStats = playerStats
-        for match in result.matches {
-            for player in [match.team1.0, match.team1.1, match.team2.0, match.team2.1] {
-                tempStats[player]?.matchesPlayed += 1
-                if tempStats[player]?.matchesPlayed ?? 0 > 4 {
-                    return false
-                }
-            }
-        }
-        
-        return true
-    }
-    
+
     private func updatePlayerStats(
         playerStats: inout [String: PlayerSchedule],
         matches: [Match],
         restingPlayers: [String],
         previousRestingPlayers: [String]
     ) {
-        // Update playing players
+        // Update players who played
         for match in matches {
-            let team1 = [match.team1.0, match.team1.1]
-            let team2 = [match.team2.0, match.team2.1]
+            let participants = [match.team1.0, match.team1.1, match.team2.0, match.team2.1]
             
-            for player in team1 + team2 {
+            for player in participants {
                 playerStats[player]?.matchesPlayed += 1
-                
-                // Update consecutive matches
-                if previousRestingPlayers.contains(player) {
-                    playerStats[player]?.consecutiveMatches = 1
-                } else {
-                    playerStats[player]?.consecutiveMatches += 1
-                }
+                playerStats[player]?.consecutiveMatches += 1
+                playerStats[player]?.consecutiveRests = 0
                 
                 // Update teammate history
-                let teammate = team1.contains(player) ?
-                team1.first { $0 != player }! :
-                team2.first { $0 != player }!
+                let teammate = participants.first { $0 != player }!
                 playerStats[player]?.lastPlayedWith[teammate, default: 0] += 1
                 
                 // Update opponent history
-                let opponents = team1.contains(player) ? team2 : team1
+                let opponents = participants.filter { $0 != player && $0 != teammate }
                 for opponent in opponents {
                     playerStats[player]?.lastPlayedAgainst[opponent, default: 0] += 1
                 }
@@ -368,25 +353,61 @@ class ViewController: UIViewController {
         // Update resting players
         for player in restingPlayers {
             playerStats[player]?.matchesResting += 1
+            playerStats[player]?.consecutiveRests += 1
             playerStats[player]?.consecutiveMatches = 0
         }
     }
-    
-    // Helper function to print the schedule
+
+    // MARK: - Output
     func printSchedule(_ schedule: [TimeSlot]) {
-        for timeSlot in schedule {
-            print("\n\(timeSlot.period):")
-            print("Resting: \(timeSlot.restingPlayers.joined(separator: ", "))")
+        for slot in schedule {
+            print("\nTime Slot: \(slot.period)")
+            print("Resting: \(slot.restingPlayers.joined(separator: ", "))")
             
-            for match in timeSlot.matches {
-                print("Court \(match.court): \(match.team1.0) & \(match.team1.1) vs \(match.team2.0) & \(match.team2.1)")
+            for match in slot.matches {
+                print("Court \(match.court): \(match.team1.0)/\(match.team1.1) vs \(match.team2.0)/\(match.team2.1)")
             }
         }
+    }
+
+    func debugValidate(_ schedule: [TimeSlot], players: [String]) {
+        var matchCounts = [String: Int]()
+        var restCounts = [String: Int]()
+        
+        for (index, slot) in schedule.enumerated() {
+            // Check court count
+            assert(slot.matches.count == 5, "Time Slot \(index) has \(slot.matches.count) courts")
+            
+            // Check player counts
+            let playingPlayers = slot.matches.flatMap { [$0.team1.0, $0.team1.1, $0.team2.0, $0.team2.1] }
+            assert(playingPlayers.count == 20, "Time Slot \(index) has \(playingPlayers.count) playing players")
+            assert(Set(playingPlayers).count == 20, "Duplicate players in time slot \(index)")
+            
+            // Track rests
+            for p in slot.restingPlayers {
+                restCounts[p, default: 0] += 1
+                if index > 0 && schedule[index-1].restingPlayers.contains(p) {
+                    fatalError("Player \(p) rested consecutively in slots \(index-1) and \(index)")
+                }
+            }
+            
+            // Track matches
+            for p in playingPlayers {
+                matchCounts[p, default: 0] += 1
+            }
+        }
+        
+        // Final counts
+        for player in players {
+            assert(matchCounts[player] == 6, "Player \(player) has \(matchCounts[player] ?? 0) matches")
+            assert(restCounts[player] == 3, "Player \(player) has \(restCounts[player] ?? 0) rests")
+        }
+        print("All validation passed!")
     }
     
     func exportScheduleToCSV(_ schedule: [TimeSlot], fileName: String = "padel_schedule") -> Bool {
         // Create CSV header
-        var csvString = "Time Period,Court 1,Court 2,Court 3,Court 4,Resting Players\n"
+        var csvString = "Time Period,Court 1,Court 2,Court 3,Court 4, Court 5,Resting Players\n"
         
         for timeSlot in schedule {
             var row: [String] = []
@@ -398,7 +419,7 @@ class ViewController: UIViewController {
                 courtMatches[match.court] = match
             }
             
-            for court in 1...4 {
+            for court in 1...5 {
                 if let match = courtMatches[court] {
                     let matchText = """
                     \(match.team1.0) + \(match.team1.1)
